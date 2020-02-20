@@ -51,15 +51,24 @@ int bytes_eq(char* a, char* b, i64 n) {
     return 1;
 }
 
+int done = 0;
+
 void crack(AESkey_t* partial_key, i64 nbits, char* iv, char* plaintext, char* true_ciphertext, i64 len) {
     char *ciphertext = malloc(512); 
     struct AES_ctx ctx;
     i64 bits;
+    done = 0;
 
     AESkey_t mask = make_AESkey_mask(nbits);
     apply_bits_to_key(&mask, partial_key, bits, nbits);
     printf("<%s>\n", plaintext);
+//#pragma omp parallel
+//#pragma omp for
     for (bits = 0; bits < (1L << nbits) - 1; bits++) {
+        if (done) {
+  //          #pragma omp cancel for
+            break;
+        }
         printf("Trying key with bits %lx\nKey: ", bits);
         apply_bits_to_key(&mask, partial_key, bits, nbits);
         AES_init_ctx_iv(&ctx, (const uint8_t*) partial_key, iv);
@@ -69,10 +78,11 @@ void crack(AESkey_t* partial_key, i64 nbits, char* iv, char* plaintext, char* tr
         if (bytes_eq(ciphertext, true_ciphertext, len - 1)) {
             printf("Key found:\n");
             print_key(partial_key);
-            return;
+            done=1;
         }
     }
-    printf("Failed to find key\n");
+    if (done == 0)
+        printf("Failed to find key\n");
 }
 
 int main() {
