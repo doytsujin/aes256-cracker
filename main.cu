@@ -17,6 +17,7 @@ typedef union aeskey {
     i64 ints[4];
 } AESkey_t;
 
+void print_key(const AESkey_t* key);
 // Creates a mask to capture the first n bits (starts from lsb)
 AESkey_t make_mask(i64 n) {
     AESkey_t mask;
@@ -33,7 +34,7 @@ AESkey_t make_mask(i64 n) {
 
     // Ignore 1 to 7 bits, if needed
     if (n)
-        mask.bytes[index] = !(( 1 << n ) - 1);
+        mask.bytes[index] = ~(( 1 << n ) - 1);
     
     return mask;
 }
@@ -124,33 +125,41 @@ void crack(const AESkey_t* partial_key, i64 nbits, char* iv, const char* plainte
 #endif
 #ifdef VCUDA
 
-__global__ void crack(  i64 n, const AESkey_t* mask, const AESkey_t* partial_key, i64 nbits, const uint8_t* iv, 
-                        const char* plaintext, const char* true_ciphertext, i64 len,
-                        int* done, AESkey_t *true_key) {
+__global__ void crack(  i64 n, const AESkey_t* mask, const AESkey_t* partial_key, i64 nbits, i64 bits_per_thread,
+                        const uint8_t* iv,  const char* plaintext, const char* true_ciphertext, i64 len,
+                        int* done, AESkey_t *true_key, char* debug_ciphertext) {
     if (*done == 0) {
-        i64 bits = ((i64) blockIdx.x) * ((i64) blockDim.x) + ((i64) threadIdx.x);
-        if (bits >= n) return;
-        
-        struct AES_ctx ctx;
-        AESkey_t local_partial_key = *partial_key;
-        char ciphertext[128];
 
-        for (int i = 0; i < (int) len; i += 1)
-            ciphertext[i] = plaintext[i];
+        for (i64 i = 0; i < (1 << bits_per_thread); i++) {
+            i64 bits = ((i64) blockIdx.x) * ((i64) blockDim.x) + ((i64) threadIdx.x);
+            if (bits >= n) return;
+            
+            // Not masking out the lower bits of bits nor the upper bits of i, should be okay though.
+            bits <<= bits_per_thread;
+            bits |= i; 
+            
+            struct AES_ctx ctx;
+            AESkey_t local_partial_key = *partial_key;
+            char ciphertext[128];
 
-        // printf("Trying key with bits %lx\nKey: ", bits);
-        apply_bits_to_key(mask, &local_partial_key, bits, nbits);
-        
-        // Reset the AES context
-        AES_init_ctx_iv(&ctx, (const uint8_t*) &local_partial_key, iv);
-        
-        // Encrypt the ciphertext (modifies ciphertext in place)
-        AES_CBC_encrypt_buffer(&ctx, (uint8_t *) ciphertext, len);
-        
-        if (bytes_eq(ciphertext, true_ciphertext, len - 1)) {
-            // print_key(&local_partial_key);
-            *done = 420;
-            *true_key = local_partial_key;
+            for (int i = 0; i < (int) len; i += 1)
+                ciphertext[i] = plaintext[i];
+    
+            // printf("Trying key with bits %lx\nKey: ", bits);
+            apply_bits_to_key(mask, &local_partial_key, bits, nbits + bits_per_thread);
+             
+            // Reset the AES context
+            AES_init_ctx_iv(&ctx, (const uint8_t*) &local_partial_key, iv);
+            
+            // Encrypt the ciphertext (modifies ciphertext in place)
+            AES_CBC_encrypt_buffer(&ctx, (uint8_t *) ciphertext, len);
+            
+            if (bytes_eq(ciphertext, true_ciphertext, len - 1)) {
+                // print_key(&local_partial_key);
+                *done = -1;
+                *true_key = local_partial_key;
+                break;
+            }
         }
     }
 }
@@ -200,10 +209,11 @@ int main() {
     AESkey_t key;
     for (int i = 0; i < sizeof(AESkey_t); i += 1) key.bytes[i] = rand() & 0xFF;
 
-    i64 nbits = 10;
+    i64 nbits = 32;
     i64 true_bits = 0xDEADBEEFCAFEBABE;
     
     AESkey_t mask = make_mask(nbits);
+    printf("Mask: \n"); print_key(&mask);
 
     apply_bits_to_key(&mask, &key, true_bits, nbits);
 
@@ -214,41 +224,7 @@ int main() {
     uint8_t iv[256];
     for (int i = 0 ; i < 32; i += 1)
         iv[i] = rand() & 0xFF;
-
-#ifdef VCUDA
-    apply_bits_to_key(&mask, &key, true_bits, nbits);
-
-    int *done = (int *) malloc(sizeof(int));
-    *done = 0;
-    AESkey_t *true_key = (AESkey_t *) malloc(sizeof(AESkey_t));
-    *true_key = AESkey_t { ints: { 0L,0L,0L,0L} };
-
-    int *d_done; cudaMalloc(&d_done, sizeof(int));
-    AESkey_t *d_true_key; cudaMalloc(&d_true_key, sizeof(AESkey_t));
-
-    cudaMemcpy(d_done, done, sizeof(int), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_true_key, true_key, sizeof(AESkey_t), cudaMemcpyHostToDevice);
-
-    crack<<<(1 << nbits)/1024, 1024>>>(1 << nbits, &mask, &key, nbits, iv, plaintext, true_ciphertext, sizeof(plaintext), d_done, d_true_key);
-    cudaError_t code = cudaPeekAtLastError();
-
-    if (code != cudaSuccess) {
-        printf("err %s\n", cudaGetErrorString(code));
-        if (abort) exit(code);
-    }
-    cudaMemcpy(done, d_done, sizeof(int), cudaMemcpyDeviceToHost);
-    cudaMemcpy(true_key, d_true_key, sizeof(AESkey_t), cudaMemcpyDeviceToHost);
-
-    printf("%d \n", *done);
-
-    if (*done) {
-        printf("Calculated true key:\n"); 
-        print_key(true_key);
-    } else {
-        printf("Failed to find true key.\n");
-    }
-#else
-
+    
     struct AES_ctx ctx;
 
     AES_init_ctx_iv(&ctx, (const uint8_t*) &key, iv);
@@ -256,6 +232,75 @@ int main() {
     strcpy(true_ciphertext, plaintext);
     AES_CBC_encrypt_buffer(&ctx, (uint8_t *) true_ciphertext, sizeof(plaintext));
  
+#ifdef VCUDA
+    cudaError_t code = cudaPeekAtLastError();
+
+#define check_for_cuda_err(line) \
+    if ((code=cudaPeekAtLastError()) != cudaSuccess) { \
+        printf("Encountered cuda error on line %d: \n %s\n", line, cudaGetErrorString(code)); \
+        exit(-1); \
+    }
+
+    apply_bits_to_key(&mask, &key, true_bits, nbits);
+
+    int *done;
+    cudaMallocManaged(&done, sizeof(int));
+    *done = 0;
+    
+    AESkey_t *true_key;
+    cudaMallocManaged(&true_key, sizeof(AESkey_t));
+    *true_key = AESkey_t { ints: { 0L,0L,0L,0L} };
+
+    char *plaintext_d;
+    cudaMallocManaged(&plaintext_d, 256);
+    strcpy(plaintext_d, plaintext);
+
+    char *true_ciphertext_d;
+    cudaMallocManaged(&true_ciphertext_d, 256);
+    strcpy(true_ciphertext_d, true_ciphertext);
+
+    char *debug_ciphertext;
+    cudaMallocManaged(&debug_ciphertext, 256);
+    strcpy(debug_ciphertext, true_ciphertext);
+
+    uint8_t *iv_d;
+    cudaMallocManaged(&iv_d, 32);
+    memcpy(iv_d, iv, 32);
+
+    AESkey_t *key_d;
+    AESkey_t *mask_d;
+    cudaMallocManaged(&key_d, sizeof(AESkey_t));
+    cudaMallocManaged(&mask_d, sizeof(AESkey_t));
+    *key_d = key;
+    *mask_d = mask;
+
+    if (nbits > 4) {
+        i64 nbits_used = nbits - 4L;
+        i64 nblocks = 1L << nbits_used;
+        printf("nblocks = %d\n", (1024L + nblocks) / 1024);
+        crack<<<(1024L + nblocks)/1024L, 1024L>>>(1 << (nbits_used), mask_d, key_d, nbits_used, 4, 
+                                                        iv_d, plaintext_d, true_ciphertext_d,
+                                                        sizeof(plaintext), done, true_key, debug_ciphertext);
+    } else {
+        crack<<<(1024L + (1L << nbits)) / 1024L, 1024L>>>(1 << nbits, mask_d, key_d, nbits, 0, 
+                                                        iv_d, plaintext_d, true_ciphertext_d,
+                                                        sizeof(plaintext), done, true_key, debug_ciphertext);
+    }
+    check_for_cuda_err(__LINE__);
+    // Wait for GPU to finish before accessing on host
+    cudaDeviceSynchronize();
+    check_for_cuda_err(__LINE__);
+   
+    printf("true key bits: %lx\n", true_key->ints[0]);
+
+    if (*done < 0) {
+        printf("Calculated true key:\n"); 
+        print_key(true_key);
+    } else {
+        printf("Failed to find true key.\n");
+    }
+#else
+
     crack(&key, nbits, iv, plaintext, true_ciphertext, sizeof(plaintext));
     
 #endif
