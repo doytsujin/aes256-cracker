@@ -202,15 +202,22 @@ void crack(const AESkey_t* partial_key, i64 nbits, char* iv, const char* plainte
 #endif
 #endif
 
-int main() {
+int main(int argn, char** argv) {
+    if (argn != 3) {
+        printf("Please supply two arguments - the number of bits to crack, and then a hex number which will represent the true bits of the key\ne.g. ./aescracker 10 0xDEADBEEFCAFE\n");
+        exit(0);
+    }
     char plaintext[] = "TESTTESTTESTTES\0";
     char *true_ciphertext = (char *) malloc(512);
 
     AESkey_t key;
     for (int i = 0; i < sizeof(AESkey_t); i += 1) key.bytes[i] = rand() & 0xFF;
 
-    i64 nbits = 32;
+    i64 nbits;
+    sscanf(argv[1], "%lld", &nbits);
+    
     i64 true_bits = 0xDEADBEEFCAFEBABE;
+    sscanf(argv[2], "%llx", &true_bits);
     
     AESkey_t mask = make_mask(nbits);
     printf("Mask: \n"); print_key(&mask);
@@ -242,27 +249,33 @@ int main() {
     }
 
     apply_bits_to_key(&mask, &key, true_bits, nbits);
-
+    int x = 0;
+    printf("a%d \n", x++); 
     int *done;
     cudaMallocManaged(&done, sizeof(int));
+    check_for_cuda_err(__LINE__);
     *done = 0;
-    
+    printf("a%d \n", x++); 
     AESkey_t *true_key;
     cudaMallocManaged(&true_key, sizeof(AESkey_t));
     *true_key = AESkey_t { ints: { 0L,0L,0L,0L} };
 
+    printf("a%d \n", x++); 
     char *plaintext_d;
     cudaMallocManaged(&plaintext_d, 256);
     strcpy(plaintext_d, plaintext);
 
+    printf("a%d \n", x++); 
     char *true_ciphertext_d;
     cudaMallocManaged(&true_ciphertext_d, 256);
     strcpy(true_ciphertext_d, true_ciphertext);
 
+    printf("a%d \n", x++); 
     char *debug_ciphertext;
     cudaMallocManaged(&debug_ciphertext, 256);
     strcpy(debug_ciphertext, true_ciphertext);
 
+    printf("a%d \n", x++); 
     uint8_t *iv_d;
     cudaMallocManaged(&iv_d, 32);
     memcpy(iv_d, iv, 32);
